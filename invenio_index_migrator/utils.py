@@ -8,6 +8,8 @@
 
 """Utility functions for index migration."""
 
+import copy
+import collections
 import json
 import six
 from celery import current_app as current_celery_app
@@ -113,7 +115,7 @@ class ESClient():
             raise Exception('unsupported ES version: {}'.format(self.config['version']))
 
 
-class RecipeState:
+class RecipeState(collections.MutableMapping):
     """Synchronization recipe state.
 
     The state is stored in ElasticSearch and can be accessed similarly to a
@@ -128,29 +130,36 @@ class RecipeState:
         self.doc_type = '_doc'
         self.force = force
         self.client = client or current_search_client
+        self.levels = []
         self._state = {}
 
     @property
     def state(self):
         """Get the full state."""
-        self._state = self.client.get(
-            index=self.index,
-            doc_type=self.doc_type,
-            id=self.document_id,
-            ignore=[404],
-        )['_source']
-        return self._state
+        state = self.load()
+        for level in self.levels:
+            state = state[level]
+        return state
 
+    def __dict__(self):
+        """Return state as a dict."""
+        return self.load()
 
     def __getitem__(self, key):
         """Get key in state."""
-        return self.state[key]
+        obj = copy.copy(self)
+        obj.levels = self.levels.copy()
+        obj.levels.append(key)
+        return obj
 
     def __setitem__(self, key, value):
         """Set key in state."""
-        state = self.state
+        _state = self.load()
+        state = _state
+        for level in self.levels:
+            state = state[level]
         state[key] = value
-        self._save(state)
+        self._save(_state)
 
     def __delitem__(self, key):
         """Delete key in state."""
@@ -164,12 +173,15 @@ class RecipeState:
     def __len__(self):
         return len(self.state)
 
-    def update(self, **changes):
-        """Update multiple keys in the state."""
-        state = self.state
-        for key, value in changes.items():
-            state[key] = value
-        self._save(state)
+    def load(self):
+        """Load the full state."""
+        self._state = self.client.get(
+            index=self.index,
+            doc_type=self.doc_type,
+            id=self.document_id,
+            ignore=[404],
+        )['_source']
+        return self._state
 
     def create(self, initial_state, force=False):
         """Create state index and the document."""
